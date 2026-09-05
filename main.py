@@ -16,7 +16,7 @@ config_api = {
         "reasoning_effort": "high",
     },
 }
-global_state = {"should_ask_input": True}
+current_state = {"should_ask_input": True,"context":[]}
 # the core idea is, the system prompt is, concating a series of text files.
 # using md for convention, but i don't expect ##s and **s in the prompt itself.
 config_agent = {"sysprompt_files": ["test.md"]}
@@ -35,7 +35,7 @@ def construct_system_prompt():
     return sysprompt
 
 
-def generate(context: list[dict[str, str]], config: dict):
+def generate(context: list[dict[str, str]], config: dict) -> str:
     header = {
         "Authorization": "Bearer " + apikey,
         "Content-Type": "application/json",
@@ -48,42 +48,50 @@ def generate(context: list[dict[str, str]], config: dict):
     return data["choices"][0]["message"]["content"]
 
 
-def mainloop():
-    if global_state["should_ask_input"]:
-        user_input = input("> ")
-        if user_input.strip():
-            global_state["should_ask_input"] = False
-            current_context.append({"role": "user", "content": user_input})
-        else:
-            logger.warning("input is empty. doing nothing")
-    current_output = generate(current_context, config_api)
-    current_context.append({"role": "assistant", "content": current_output})
-    if current_output.startswith(RUN_SHELL_PREFIX):
-        command = current_output.removeprefix(RUN_SHELL_PREFIX)
-        logger.info("\nshell:" + command)
+def process_model_output(output: str):
+    if RUN_SHELL_PREFIX in output:
+        user_msg, _, cmd = output.partition(RUN_SHELL_PREFIX)
+        if user_msg:
+            print(user_msg)
+        logger.info("shell:" + cmd)
         # NOTE using check=true will raise exception on error, making shell_result_obj invalid.
         # but the agent needs to see the error message, so check=false makes this more intuitive.
         shell_result = subprocess.run(
-            command, shell=True, capture_output=True, check=False,text=True
+            cmd, shell=True, capture_output=True, check=False, text=True
         )
-        shell_output = shell_result.stdout+shell_result.stderr
-        if shell_result.returncode!=0:
+        shell_output = shell_result.stdout + shell_result.stderr
+        if shell_result.returncode != 0:
             logger.warning("shell command returned non-zero")
-        current_context.append(
+        logger.debug("shell output:\n"+shell_output)
+        current_state["context"].append(
             {"role": "user", "content": SHELL_OUTPUT_PREFIX + shell_output}
         )
     else:
-        global_state["should_ask_input"] = True
-        print(current_output)
+        current_state["should_ask_input"] = True
+        print(output)
+
+
+def mainloop():
+    if current_state["should_ask_input"]:
+        user_input = input("> ")
+        if user_input.strip():
+            current_state["should_ask_input"] = False
+            current_state["context"].append({"role": "user", "content": user_input})
+        else:
+            logger.warning("input is empty. doing nothing")
+            return
+    model_output = generate(current_state["context"], config_api)
+    current_state["context"].append({"role": "assistant", "content": model_output})
+    process_model_output(model_output)
 
 
 # === main section ===
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=LOG_LEVEL, format="%(levelname)s:%(message)s")
-current_context = [{"role": "system", "content": construct_system_prompt()}]
-global_state["should_ask_input"] = True
+current_state["context"] = [{"role": "system", "content": construct_system_prompt()}]
+current_state["should_ask_input"] = True
 while True:
     try:
         mainloop()
     except KeyboardInterrupt:
-        global_state["should_ask_input"] = True
+        current_state["should_ask_input"] = True
