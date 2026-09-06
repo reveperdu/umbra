@@ -2,8 +2,10 @@ import argparse
 import json
 import logging
 import os
+import re
 import readline  # noqa: F401
 import subprocess
+import sys
 
 import requests
 
@@ -51,7 +53,12 @@ def generate(context: list[dict[str, str]], config: dict) -> str:
 
 
 def process_model_output(output: str):
-    if RUN_SHELL_PREFIX in output:
+    # considerations for deciding shell or user message is that,
+    # the model might output a user message followed by a shell command
+    # eg "okay i'll do it\n[RUN]...", or a prefix inside a sentence
+    # without intent to run shell, eg "i know. i should output [RUN] when ..."
+    # these are the two cases that need to be handled correctly.
+    if re.search(r"(?m)^\[RUN\]", output):
         user_msg, _, cmd = output.partition(RUN_SHELL_PREFIX)
         if user_msg:
             print(user_msg)
@@ -69,31 +76,43 @@ def process_model_output(output: str):
             {"role": "user", "content": SHELL_OUTPUT_PREFIX + shell_output}
         )
     else:
-        current_state["should_ask_input"] = True
-        print(output)
+        current_state["should_generate"] = False
+        out_str = "\n" + output + "\n"
+        print(out_str)
+
+
+def handle_user_command(cmd: str):
+    match cmd.split():
+        case ["save"]:
+            with open("session-log.json", "w") as f:
+                json.dump(current_state["context"], f, ensure_ascii=False, indent=4)
+        case ["exit"]:
+            sys.exit(0)
 
 
 def mainloop():
-    if current_state["should_ask_input"]:
+    if not current_state["should_generate"]:
         user_input = input("> ")
-        if user_input.strip():
-            current_state["should_ask_input"] = False
-            current_state["context"].append({"role": "user", "content": user_input})
-        else:
+        if user_input.startswith("/"):
+            handle_user_command(user_input.removeprefix("/"))
+        elif not user_input.strip():
             logger.warning("input is empty. doing nothing")
-            return
-    model_output = generate(current_state["context"], config["api"])
-    current_state["context"].append({"role": "assistant", "content": model_output})
-    process_model_output(model_output)
+        else:
+            current_state["context"].append({"role": "user", "content": user_input})
+            current_state["should_generate"] = True
+    if current_state["should_generate"]:
+        model_output = generate(current_state["context"], config["api"])
+        current_state["context"].append({"role": "assistant", "content": model_output})
+        process_model_output(model_output)
 
 
 # === main section ===
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=LOG_LEVEL, format="%(levelname)s:%(message)s")
 current_state["context"] = [{"role": "system", "content": construct_system_prompt()}]
-current_state["should_ask_input"] = True
+current_state["should_generate"] = False
 while True:
     try:
         mainloop()
     except KeyboardInterrupt:
-        current_state["should_ask_input"] = True
+        current_state["should_generate"] = False
