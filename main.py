@@ -1,3 +1,5 @@
+import argparse
+import json
 import logging
 import os
 import readline  # noqa: F401
@@ -8,27 +10,27 @@ import requests
 RUN_SHELL_PREFIX = "[RUN]"
 SHELL_OUTPUT_PREFIX = "[SHELL]"
 LOG_LEVEL = logging.INFO
-config_api = {
-    "url": "https://api.deepseek.com/chat/completions",
-    "modelConfig": {
-        "model": "deepseek-v4-flash",
-        "thinking": {"type": "enabled"},
-        "reasoning_effort": "high",
-    },
-}
-current_state = {"should_ask_input": True,"context":[]}
+parser = argparse.ArgumentParser()
+parser.add_argument("-c", "--config")
+args = parser.parse_args()
+config_path = "config.json"
+if args.config is not None:
+    config_path = args.config
+with open(config_path) as f:
+    config = json.load(f)
 # the core idea is, the system prompt is, concating a series of text files.
 # using md for convention, but i don't expect ##s and **s in the prompt itself.
-config_agent = {"sysprompt_files": ["test.md"]}
+current_state = {"should_ask_input": True, "context": []}
+
 if "API_KEY" in os.environ:
     apikey = os.environ["API_KEY"]
 else:
-    raise RuntimeError("No API Key Found.")
+    raise RuntimeWarning("No API Key Found.")
 
 
 def construct_system_prompt():
     sysprompt = ""
-    for fname in config_agent["sysprompt_files"]:
+    for fname in config["agent"]["sysprompt_files"]:
         with open(fname) as f:
             contents = f.read()
             sysprompt = sysprompt + f"\n# {fname}\n" + contents
@@ -62,7 +64,7 @@ def process_model_output(output: str):
         shell_output = shell_result.stdout + shell_result.stderr
         if shell_result.returncode != 0:
             logger.warning("shell command returned non-zero")
-        logger.debug("shell output:\n"+shell_output)
+        logger.debug("shell output:\n" + shell_output)
         current_state["context"].append(
             {"role": "user", "content": SHELL_OUTPUT_PREFIX + shell_output}
         )
@@ -80,7 +82,7 @@ def mainloop():
         else:
             logger.warning("input is empty. doing nothing")
             return
-    model_output = generate(current_state["context"], config_api)
+    model_output = generate(current_state["context"], config["api"])
     current_state["context"].append({"role": "assistant", "content": model_output})
     process_model_output(model_output)
 
