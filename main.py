@@ -14,12 +14,18 @@ SHELL_OUTPUT_PREFIX = "[SHELL]"
 LOG_LEVEL = logging.INFO
 parser = argparse.ArgumentParser()
 parser.add_argument("-c", "--config")
+parser.add_argument("-v", "--verbose", action="store_true")
 args = parser.parse_args()
 config_path = "config.json"
+prompt_macro_path = "prompt_macro.json"
 if args.config is not None:
     config_path = args.config
 with open(config_path) as f:
     config = json.load(f)
+with open(prompt_macro_path) as f:
+    prompt_macro = json.load(f)
+if args.verbose:
+    LOG_LEVEL = logging.DEBUG
 # the core idea is, the system prompt is, concating a series of text files.
 # using md for convention, but i don't expect ##s and **s in the prompt itself.
 current_state = {"should_ask_input": True, "context": []}
@@ -49,6 +55,7 @@ def generate(context: list[dict[str, str]], config: dict) -> str:
     resp = requests.post(config["url"], headers=header, json=data)
     resp.raise_for_status()
     data = resp.json()
+    logger.debug(data)
     return data["choices"][0]["message"]["content"]
 
 
@@ -88,6 +95,14 @@ def handle_user_command(cmd: str):
                 json.dump(current_state["context"], f, ensure_ascii=False, indent=4)
         case ["exit"]:
             sys.exit(0)
+        case _:
+            if cmd in prompt_macro:
+                current_state["context"].append(
+                    {"role": "user", "content": prompt_macro[cmd]}
+                )
+                current_state["should_generate"] = True
+            else:
+                logger.info("command not found:" + cmd)
 
 
 def mainloop():
