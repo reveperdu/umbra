@@ -9,8 +9,6 @@ import sys
 
 import requests
 
-RUN_SHELL_PREFIX = "[RUN]"
-SHELL_OUTPUT_PREFIX = "[SHELL]"
 LOG_LEVEL = logging.INFO
 parser = argparse.ArgumentParser()
 parser.add_argument("-c", "--config")
@@ -60,27 +58,32 @@ def generate(context: list[dict[str, str]], config: dict) -> str:
 
 
 def process_model_output(output: str):
-    # considerations for deciding shell or user message is that,
-    # the model might output a user message followed by a shell command
-    # eg "okay i'll do it\n[RUN]...", or a prefix inside a sentence
-    # without intent to run shell, eg "i know. i should output [RUN] when ..."
-    # these are the two cases that need to be handled correctly.
-    if re.search(r"(?m)^\[RUN\]", output):
-        user_msg, _, cmd = output.partition(RUN_SHELL_PREFIX)
-        if user_msg:
-            print(user_msg)
+    # after the model repeatedly mix the shell command
+    # and freeform text, (particularly on non-cot)
+    # pairing [/RUN] is added to address this.
+    mo = re.search(r"(?s)\[RUN\](.*?)\[/RUN\]", output)
+    if mo:
+        msg_head, cmd, msg_tail = output[: mo.start()], mo[1], output[mo.end() :]
+        if msg_head:
+            print(msg_head)
         logger.info("shell:" + cmd)
+        if msg_tail:
+            print(msg_tail)
         # NOTE using check=true will raise exception on error, making shell_result_obj invalid.
         # but the agent needs to see the error message, so check=false makes this more intuitive.
         shell_result = subprocess.run(
             cmd, shell=True, capture_output=True, check=False, text=True
         )
         shell_output = shell_result.stdout + shell_result.stderr
+        if shell_output == "":
+            # letting the agent know the output is empty,
+            # rather than leaving an ambiguous `[SHELL]` in the context
+            shell_output = "(no output)"
         if shell_result.returncode != 0:
             logger.warning("shell command returned non-zero")
         logger.debug("shell output:\n" + shell_output)
         current_state["context"].append(
-            {"role": "user", "content": SHELL_OUTPUT_PREFIX + shell_output}
+            {"role": "user", "content": "[SHELL]"+ shell_output}
         )
     else:
         current_state["should_generate"] = False
