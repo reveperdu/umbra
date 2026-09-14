@@ -26,7 +26,11 @@ if args.verbose:
     LOG_LEVEL = logging.DEBUG
 # the core idea is, the system prompt is, concating a series of text files.
 # using md for convention, but i don't expect ##s and **s in the prompt itself.
-current_state = {"should_ask_input": True, "context": []}
+current_state = {
+    "should_ask_input": True,
+    "context": [],
+    "token_stats": {"input": 0, "cache": 0, "output": 0, "total": 0, "last_context": 0},
+}
 
 if "API_KEY" in os.environ:
     apikey = os.environ["API_KEY"]
@@ -43,17 +47,28 @@ def construct_system_prompt():
     return sysprompt
 
 
+def record_usage(usage_data: dict):
+    tstat = current_state["token_stats"]
+    cache = usage_data["prompt_tokens_details"]["cached_tokens"]
+    tstat["cache"] += cache
+    tstat["input"] += usage_data["prompt_tokens"] - cache
+    tstat["output"] += usage_data["completion_tokens"]
+    tstat["total"] = tstat["input"] + tstat["cache"] + tstat["output"]
+    tstat["last_context"] = usage_data["prompt_tokens"]
+
+
 def generate(context: list[dict[str, str]], config: dict) -> str:
     header = {
         "Authorization": "Bearer " + apikey,
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
-    data = {"messages": context} | config["modelConfig"]
+    data = {"messages": context} | config["model_config"]
     resp = requests.post(config["url"], headers=header, json=data)
     resp.raise_for_status()
     data = resp.json()
     logger.debug(data)
+    record_usage(data["usage"])
     return data["choices"][0]["message"]["content"]
 
 
@@ -83,7 +98,7 @@ def process_model_output(output: str):
             logger.warning("shell command returned non-zero")
         logger.debug("shell output:\n" + shell_output)
         current_state["context"].append(
-            {"role": "user", "content": "[SHELL]"+ shell_output}
+            {"role": "user", "content": "[SHELL]" + shell_output}
         )
     else:
         current_state["should_generate"] = False
@@ -98,6 +113,8 @@ def handle_user_command(cmd: str):
                 json.dump(current_state["context"], f, ensure_ascii=False, indent=4)
         case ["exit"]:
             sys.exit(0)
+        case ["token"]:
+            print(current_state["token_stats"])
         case _:
             if cmd in prompt_macro:
                 current_state["context"].append(
