@@ -1,4 +1,5 @@
 import argparse
+import base64
 import json
 import logging
 import os
@@ -8,34 +9,6 @@ import subprocess
 import sys
 
 import requests
-
-LOG_LEVEL = logging.INFO
-parser = argparse.ArgumentParser()
-parser.add_argument("-c", "--config")
-parser.add_argument("-v", "--verbose", action="store_true")
-args = parser.parse_args()
-config_path = "config.json"
-prompt_macro_path = "prompt_macro.json"
-if args.config is not None:
-    config_path = args.config
-with open(config_path) as f:
-    config = json.load(f)
-with open(prompt_macro_path) as f:
-    prompt_macro = json.load(f)
-if args.verbose:
-    LOG_LEVEL = logging.DEBUG
-# the core idea is, the system prompt is, concating a series of text files.
-# using md for convention, but i don't expect ##s and **s in the prompt itself.
-current_state = {
-    "should_ask_input": True,
-    "context": [],
-    "token_stats": {"input": 0, "cache": 0, "output": 0, "total": 0, "last_context": 0},
-}
-
-if "API_KEY" in os.environ:
-    apikey = os.environ["API_KEY"]
-else:
-    raise RuntimeWarning("No API Key Found.")
 
 
 def construct_system_prompt():
@@ -72,6 +45,24 @@ def generate(context: list[dict[str, str]], config: dict) -> str:
     return data["choices"][0]["message"]["content"]
 
 
+def exec_shell(cmd: str):
+    shell_result = subprocess.run(
+        cmd, shell=True, capture_output=True, check=False, text=True
+    )
+    shell_output = shell_result.stdout + shell_result.stderr
+    if shell_output == "":
+        # letting the agent know the output is empty,
+        # rather than leaving an ambiguous `[SHELL]` in the context
+        shell_output = "(no output)"
+    if len(shell_output) > 1000:
+        shell_output = shell_output[:1000] + "...(too long, truncated)"
+        logger.info("shell command returned very long output: " + cmd)
+    if shell_result.returncode != 0:
+        logger.warning("shell command returned non-zero")
+    logger.debug("shell output:\n" + shell_output)
+    return shell_output
+
+
 def process_model_output(output: str):
     # after the model repeatedly mix the shell command
     # and freeform text, (particularly on non-cot)
@@ -81,22 +72,15 @@ def process_model_output(output: str):
         msg_head, cmd, msg_tail = output[: mo.start()], mo[1], output[mo.end() :]
         if msg_head:
             print(msg_head)
-        logger.info("shell:" + cmd)
+        logger.info("shell: " + cmd)
         if msg_tail:
             print(msg_tail)
         # NOTE using check=true will raise exception on error, making shell_result_obj invalid.
         # but the agent needs to see the error message, so check=false makes this more intuitive.
-        shell_result = subprocess.run(
-            cmd, shell=True, capture_output=True, check=False, text=True
-        )
-        shell_output = shell_result.stdout + shell_result.stderr
-        if shell_output == "":
-            # letting the agent know the output is empty,
-            # rather than leaving an ambiguous `[SHELL]` in the context
-            shell_output = "(no output)"
-        if shell_result.returncode != 0:
-            logger.warning("shell command returned non-zero")
-        logger.debug("shell output:\n" + shell_output)
+        if ALLOW_SHELL:
+            shell_output = exec_shell(cmd)
+        else:
+            shell_output = "sorry, shell is not permitted in this environment."
         current_state["context"].append(
             {"role": "user", "content": "[SHELL]" + shell_output}
         )
@@ -106,15 +90,95 @@ def process_model_output(output: str):
         print(out_str)
 
 
-def handle_user_command(cmd: str):
-    match cmd.split():
-        case ["save"]:
-            with open("session-log.json", "w") as f:
+def trunc_context(mode="keep_last_n", **kw):
+    # a very crude impl to truncate the context, but any act of modifying the context should require caution.
+    if mode == "keep_last_n":
+        n_keep = kw.get("n_keep", 10)
+        if n_keep <= 1:
+            logger.warning(
+                "invalid value for truncation. at least 2 items should be kept (1 user + 1 assistant)"
+            )
+            return
+        if n_keep % 2 != 0:
+            logger.warning("n_keep for keep_last_n truncation is not even.")
+        system_msg = [
+            msg for msg in current_state["context"] if msg["role"] == "system"
+        ]
+        keep_msg = current_state["context"][-n_keep:]
+        current_state["context"] = system_msg + keep_msg
+        t = str(keep_msg[0]["content"])
+        if len(t) > 100:
+            t = t[:100] + "..."
+        logger.info("context truncated to message:\n" + t)
+    elif mode == "trunc_shell":
+        for msg in current_state["context"]:
+            if msg["content"].startswith("[SHELL]"):
+                msg["content"] = "[SHELL] <truncated>"
+                logger.info("all shell outputs removed.")
+    else:
+        logger.warning("invalid mode for trunc command: " + mode)
+
+
+def handle_user_command(cmdtext: str):
+    cmd, *args = cmdtext.split()
+    match cmd:
+        case "load":
+            # load from the direct output of context,overwriting whatever current context.
+            fname = "session-log.json" if len(args) == 0 else args[0]
+            with open(fname, "r") as f:
+                current_state["context"] = json.load(f)
+        case "save":
+            fname = "session-log.json" if len(args) == 0 else args[0]
+            with open(fname, "w") as f:
                 json.dump(current_state["context"], f, ensure_ascii=False, indent=4)
-        case ["exit"]:
+        case "exit":
             sys.exit(0)
-        case ["token"]:
+        case "token":
             print(current_state["token_stats"])
+        case "mline":
+            # multiline input
+            print("please input heredoc-like text, end with EOF")
+            user_input_mline = ""
+            line = input()
+            while line != "EOF":
+                user_input_mline += line + "\n"
+                line = input()
+            current_state["context"].append(
+                {"role": "user", "content": user_input_mline}
+            )
+            current_state["should_generate"] = True
+        case "trunc":
+            if len(args) == 0:
+                logger.warning("cannot parse.")
+                return
+            if args[0] == "shell":
+                trunc_context("trunc_shell")
+            else:
+                if args[0].isdigit():
+                    trunc_context(n_keep=int(args[0]))
+                else:
+                    logger.warning("cannot parse.")
+                    return
+        case "image":
+            # in doc examples the message included a text query accompanying the image,
+            # but possibly not need
+            # msg="[image]"
+            # also, this action is supposed to be "included an external data to chat",
+            # so "should generate" is not set to true after.
+            fname = "image.png" if len(args) == 0 else args[0]
+            with open(fname, "rb") as f:
+                base64_str = base64.b64encode(f.read()).decode("utf-8")
+            current_state["context"].append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{base64_str}"},
+                        }
+                    ],
+                }
+            )
         case _:
             if cmd in prompt_macro:
                 current_state["context"].append(
@@ -141,13 +205,65 @@ def mainloop():
         process_model_output(model_output)
 
 
-# === main section ===
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=LOG_LEVEL, format="%(levelname)s:%(message)s")
-current_state["context"] = [{"role": "system", "content": construct_system_prompt()}]
-current_state["should_generate"] = False
-while True:
-    try:
-        mainloop()
-    except KeyboardInterrupt:
-        current_state["should_generate"] = False
+if __name__ == "__main__":
+    # setting up
+    LOG_LEVEL = logging.INFO
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-c", "--config")
+    parser.add_argument("-v", "--verbose", action="store_true")
+    args = parser.parse_args()
+    config_path = "config.json"
+    prompt_macro_path = "prompt_macro.json"
+    if args.config is not None:
+        config_path = args.config
+    with open(config_path) as f:
+        config = json.load(f)
+    with open(prompt_macro_path) as f:
+        prompt_macro = json.load(f)
+    if args.verbose:
+        LOG_LEVEL = logging.DEBUG
+    ALLOW_SHELL = True
+    if "allow_shell" in config["agent"] and config["agent"]["allow_shell"] == False:
+        ALLOW_SHELL = False
+
+    # the core idea is, the system prompt is, concating a series of text files...
+    # but that was the idea that the prompt should be tuned by the ai itself as appropriate,
+    # however it is unnecessary if the prompt is maintained manually...
+    # using md for convention, but i don't expect ##s and **s in the prompt itself.
+    current_state = {
+        "should_ask_input": True,
+        "context": [],
+        "token_stats": {
+            "input": 0,
+            "cache": 0,
+            "output": 0,
+            "total": 0,
+            "last_context": 0,
+        },
+    }
+
+    logger = logging.getLogger(__name__)
+    logging.basicConfig(level=LOG_LEVEL, format="%(levelname)s:%(message)s")
+    current_state["context"] = [
+        {"role": "system", "content": construct_system_prompt()}
+    ]
+    if "API_KEY" in os.environ:
+        apikey = os.environ["API_KEY"]
+    else:
+        logger.warning("No API Key Found.")
+    current_state["should_generate"] = False
+    while True:
+        try:
+            mainloop()
+        except KeyboardInterrupt:
+            current_state["should_generate"] = False
+        except requests.HTTPError as e:
+            if len(e.response.text) < 100:
+                rtext = e.response.text
+            else:
+                rtext = e.response.text[:100] + "..."
+            current_state["should_generate"] = False
+            logger.error(
+                f"received http code {e.response.status_code},"
+                + f"the response reads:\n{rtext}"
+            )
