@@ -54,9 +54,11 @@ def exec_shell(cmd: str):
         # letting the agent know the output is empty,
         # rather than leaving an ambiguous `[SHELL]` in the context
         shell_output = "(no output)"
-    if len(shell_output) > 1000:
-        shell_output = shell_output[:1000] + "...(too long, truncated)"
-        logger.info("shell command returned very long output: " + cmd)
+    if len(shell_output) > SHELL_RESULT_TRUNC:
+        shell_output = shell_output[:SHELL_RESULT_TRUNC] + "...(too long, truncated)"
+        logger.info("shell command returned very long output(truncated): " + cmd)
+    elif len(shell_output) > SHELL_RESULT_TRUNC / 4:
+        logger.info("shell command returned very long output(not truncated): " + cmd)
     if shell_result.returncode != 0:
         logger.warning("shell command returned non-zero")
     logger.debug("shell output:\n" + shell_output)
@@ -120,6 +122,9 @@ def trunc_context(mode="keep_last_n", **kw):
 
 
 def handle_user_command(cmdtext: str):
+    if not cmdtext.strip():
+        logger.warning("empty command. doing nothing.")
+        return
     cmd, *args = cmdtext.split()
     match cmd:
         case "load":
@@ -208,6 +213,9 @@ def mainloop():
 if __name__ == "__main__":
     # setting up
     LOG_LEVEL = logging.INFO
+    # note for latin text (most shell) where roughly 4 char=1 token,
+    # but for cjk text about 1.5 char=1 token
+    SHELL_RESULT_TRUNC = 20000
     parser = argparse.ArgumentParser()
     parser.add_argument("-c", "--config")
     parser.add_argument("-v", "--verbose", action="store_true")
