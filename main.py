@@ -107,7 +107,10 @@ def trunc_context(mode="keep_last_n", **kw):
             msg for msg in current_state["context"] if msg["role"] == "system"
         ]
         keep_msg = current_state["context"][-n_keep:]
-        current_state["context"] = system_msg + keep_msg
+        notice_msg = [
+            {"role": "user", "content": "[SYSTEM] earlier context has been discarded."}
+        ]
+        current_state["context"] = system_msg + notice_msg + keep_msg
         t = str(keep_msg[0]["content"])
         if len(t) > 100:
             t = t[:100] + "..."
