@@ -224,13 +224,15 @@ if __name__ == "__main__":
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
     config_path = "config.json"
-    prompt_macro_path = "prompt_macro.json"
     if args.config is not None:
         config_path = args.config
     with open(config_path) as f:
         config = json.load(f)
-    with open(prompt_macro_path) as f:
-        prompt_macro = json.load(f)
+    if "prompt_macro_path" in config["agent"]:
+        with open(config["agent"]["prompt_macro_path"]) as f:
+            prompt_macro = json.load(f)
+    else:
+        prompt_macro={}
     if args.verbose:
         LOG_LEVEL = logging.DEBUG
     ALLOW_SHELL = True
