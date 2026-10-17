@@ -124,7 +124,7 @@ def trunc_context(mode="keep_last_n", **kw):
         for msg in cur_state.context:
             if msg["content"].startswith("[SHELL]"):
                 msg["content"] = "[SHELL] <truncated>"
-            logger.info("all shell outputs removed.")
+                logger.info("all shell outputs removed.")
     else:
         logger.warning("invalid mode for trunc command: " + mode)
 
